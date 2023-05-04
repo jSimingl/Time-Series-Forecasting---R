@@ -1,0 +1,410 @@
+---
+title: "Project"
+output: pdf_document
+date: "2022-11-29"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(forecast)
+library(lubridate)
+library(dplyr)
+library(zoo)
+library(readxl)
+library(astsa)
+library(ggplot2)
+```
+
+
+```{r}
+cpi = read.csv("CPI(ALL ITEMS).csv")
+cpi.gas = read.csv("cpi(gasoline).csv")
+crudeoil = read.csv("crude-oil-price.csv")
+gasoline.retail = read.csv("gasoline retail price.csv")
+production = read.csv("OPEC_Crude_Oil.csv",header=FALSE)
+```
+
+## Data Pre-processing
+```{r}
+crudeoil$date <- as.Date(crudeoil$date)
+```
+
+Arrange from least recent to most recent
+```{r}
+cpi.gas <- cpi.gas %>% arrange(mdy(cpi.gas$DATE))
+crudeoil <- crudeoil[order(crudeoil$date),]
+gasoline.retail <- gasoline.retail %>% arrange(my(gasoline.retail$Date))
+```
+
+```{r}
+cpi.ts = ts(cpi$CPIAUCSL, start=c(2012,1), end=c(2022,9),frequency = 12)
+cpi.gas.ts = ts(cpi.gas$CUUR0000SETB01, start=c(2012,1), end=c(2022,9),frequency=12)
+crudeoil.ts = ts(crudeoil$price.barrel.42.gal., start=c(2012,1), end=c(2022,9),frequency=12)
+gasoline.ts = ts(gasoline.retail$U.S..All.Grades.All.Formulations.Retail.Gasoline.Prices..Dollars.per.Gallon., start=c(2012,1),  end=c(2022,9),frequency=12)
+production.ts = ts(production$V2,start=c(2012,1),  end=c(2022,9),frequency=12)
+```
+
+```{r}
+plot(gasoline.ts, ylab="Price per Gallon ($)", xlab = "Year", main = "Gasoline Monthly Retail Prices")
+t = aggregate(gasoline.ts,FUN=mean)
+autoplot(t)
+
+Acf(gasoline.ts,50)
+Pacf(gasoline.ts)
+
+autoplot(cpi.ts)
+autoplot(cpi.gas.ts)
+autoplot(crudeoil.ts)
+autoplot(production.ts)
+```
+
+
+```{r}
+df1 = gasoline.ts 
+df2 = cpi.ts 
+df3 = cpi.gas.ts
+df4 = crudeoil.ts
+df5 = production.ts
+
+for (i in 2:5) {
+  df1 <- cbind(df1, eval(parse(text=paste("df", i, sep = ''))))
+}
+
+colnames(df1) <- c('Gasoline_Retail_Price','CPI(ALL)',
+                   'CPI(Gas)',
+                   'Crude_Oil_Price',
+                   'Crude_Oil_Production')
+df1 = as.data.frame(df1)
+```
+
+## Simple Naive & Seasonal Naive
+```{r}
+gasoline.ts <- ts(df1$Gasoline_Retail_Price, start=c(2012,1),end=c(2022,9),frequency = 12)
+
+n=length(gasoline.ts)
+stepsAhead = 9
+nTraining= n-stepsAhead
+training <- window(gasoline.ts, start=c(2012,1), end=c(2012,nTraining))
+validation <- window(gasoline.ts, start=c(2012,nTraining+1), end=c(2012,nTraining+stepsAhead))
+
+naive = naive(training, h= stepsAhead)
+
+autoplot(training, main = "Forecasts from Simple Naive Method") + autolayer(validation) + autolayer(naive, PI=FALSE, series = "Predictions")
+accuracy(naive, validation)
+```
+
+```{r}
+snaive = snaive(training, h= stepsAhead)
+autoplot(training, main = "Forecasts from Seasonal Naive Method") + autolayer(validation) + autolayer(snaive, PI=FALSE, series = "Predictions")
+accuracy(snaive, validation)
+```
+
+## Moving Average Model
+```{r}
+gasoline.ts <- ts(df1$Gasoline_Retail_Price, start=c(2012,1),end=c(2022,9),frequency = 12)
+
+n = length(gasoline.ts)
+
+w = 9
+nValid = w
+
+ma.trail.pred= rep(NA, nValid)
+
+for (i in 1:nValid) {
+  nTraining= n-nValid + (i - 1)
+  training1=window(gasoline.ts, start=c(2012, 1), 
+                    end=c(2012, nTraining))
+  
+  ma.trailing.tmp = rollmean(training1, k=w, align="right")
+  last.ma=tail(ma.trailing.tmp,1)
+  
+  ma.trail.pred[i] = last.ma
+}
+
+ma.pred= ts(ma.trail.pred,start=c(2012,length(gasoline.ts)-nValid+1), frequency = 12)
+
+validation <- window(gasoline.ts, start=c(2022,1))
+
+ma.trailing.right = rollmean(training, k=9, align="right")
+ma.trailing.center = rollmean(training, k=9, align="center")
+
+autoplot(training, main = "Forecasts from Rolling Moving Average Method") +
+  autolayer(validation, series ="Validation")+autolayer(ma.pred, series = "Prediction") +
+  autolayer(ma.trailing.right, series = "Trailing MA") +
+  autolayer(ma.trailing.center, series = "Centered MA")
+
+e <- ma.pred - validation 
+
+m <- quantile(e, probs = c(0.025,0.975))
+lb=ma.pred+m[1]
+ub=ma.pred+m[2]
+
+autoplot(ma.pred) +
+  autolayer(lb)+ autolayer(ub)
+
+accuracy(ma.trailing.right, training)
+accuracy(ma.pred, validation)
+```
+
+## Holt-Winter's model
+```{r}
+gasoline.ts <- ts(df1$Gasoline_Retail_Price, start=c(2012,1),end=c(2022,9),frequency = 12)
+
+n=length(gasoline.ts)
+stepsAhead = 9
+
+nTraining=n-stepsAhead
+training2 <- window(gasoline.ts, start=c(2012,1), end=c(2012,nTraining))
+
+zzz=ets(training2,model='ZZZ')
+zzz.pred=forecast(zzz,h=stepsAhead,level=0)
+autoplot(training2, main = "Forecasts from Holt-Winter's Method")+autolayer(validation, series = "Validation")+autolayer(zzz.pred, series = "Predictions")
+accuracy(zzz.pred,validation)
+```
+
+## ARIMA Model
+```{r}
+par(mfrow=c(1,2))
+Acf(training)
+Pacf(training)
+par(mfrow=c(1,1))
+```
+
+```{r}
+auto.arima(gasoline.ts)
+```
+
+```{r}
+m1 = arima(training,order=c(0,1,1),seasonal=list(order=c(1,0,0),period=12))
+m1.pred = forecast(m1,h=9)
+accuracy(m1.pred, validation)
+```
+
+```{r}
+m2 = arima(training,order=c(0,1,1),seasonal=list(order=c(0,0,0),period=12))
+m2.pred = forecast(m2,h=9)
+accuracy(m2.pred, validation)
+
+autoplot(training, main = "Forecast from ARIMA(0,1,1)") +
+  autolayer(validation, series="Validation")+
+  autolayer(m2.pred, series="Prediction",PI=FALSE)
+```
+
+## Neural Network
+```{r}
+gasoline.ts <- ts(df1$Gasoline_Retail_Price, start=c(2012,1),end=c(2022,9),frequency = 12)
+
+nValid = 9
+nTrain <- length(gasoline.ts) - nValid
+train.ts <- window(gasoline.ts, start = c(2012, 1), end = c(2012, nTrain))
+valid.ts <- window(gasoline.ts, start = c(2012, nTrain + 1))
+
+gasolineprice.nnetar.opt <- nnetar(train.ts)
+
+gasolineprice.nnetar.opt.pred <- forecast(gasolineprice.nnetar.opt, h = 9)
+
+autoplot(train.ts, main = "Forecasts from Neural Network Method") +
+  autolayer(valid.ts, series = "Validation") +
+  autolayer(gasolineprice.nnetar.opt.pred, series = "Predictions")
+accuracy(gasolineprice.nnetar.opt.pred, valid.ts)  
+```
+
+## Regression with external factors
+```{r}
+pairs(df1)
+```
+
+```{r}
+qplot(df1$`CPI(ALL)`,df1$Gasoline_Retail_Price)
+qplot(df1$`CPI(Gas)`,df1$Gasoline_Retail_Price)
+qplot(df1$Crude_Oil_Price, df1$Gasoline_Retail_Price)
+qplot(df1$Crude_Oil_Production,df1$Gasoline_Retail_Price)
+```
+
+
+## Study the cross-correlations between the each variable and gasoline retail price
+```{r}
+Ccf(df1$`CPI(ALL)`,df1$Gasoline_Retail_Price, 50)
+Ccf(df1$`CPI(Gas)`,df1$Gasoline_Retail_Price, 77)
+Ccf(df1$Crude_Oil_Price, df1$Gasoline_Retail_Price, 78)
+Ccf(df1$Crude_Oil_Production,df1$Gasoline_Retail_Price, 50)
+```
+
+1. CPI(ALL) 34 months ago affect the gasoline retail price now
+
+2. CPI(GAS) 76 months ago affect the gasoline retail price now
+
+3. Spot price of crude oil contracts 77 months ago affect the gasoline retail price now
+
+4. Crude oil production 20 months ago affect the gasoline retail price now
+
+```{r}
+library(tidyverse)
+lag <- stats::lag
+
+newdata <- ts.intersect(retail_price = gasoline.ts, 
+                        leadcpi=lag(cpi.ts,-34),
+                        leadcpigas=lag(cpi.gas.ts,-76),
+                        leadcrudepri=lag(crudeoil.ts,-77),
+                        leadcrudepro=lag(production.ts,-20))
+
+
+m3 = tslm(retail_price~leadcpi + leadcpigas + leadcrudepri + leadcrudepro,data=newdata)
+summary(m3)
+
+m4 = tslm(retail_price~leadcpi + leadcrudepri + leadcrudepro,data=newdata)
+summary(m4)
+accuracy(m4$fitted.values, gasoline.ts)
+```
+
+```{r}
+e <- m4$fitted.values - gasoline.ts
+m <- quantile(e, probs = c(0.025,0.975))
+lb=m4$fitted.values+m[1]
+ub=m4$fitted.values+m[2]
+
+reg.ts <- window(gasoline.ts,start=c(2018,6), frequency=12)
+autoplot(m4$fitted.values, series = "Prediction", lwd=1.5, main="Forecasts from Multiple Regression") +
+  autolayer(lb,lty="dashed")+ autolayer(ub,lty="dashed") + autolayer(reg.ts, series="Observed",lwd=0.5, col = 0)
+```
+
+```{r}
+data = as.data.frame(newdata)
+attach(data)
+checkresiduals(m4)
+acf2(resid(m4))
+
+m5 = Arima(retail_price,order=c(2,0,0), xreg = cbind(leadcpi,leadcrudepri,leadcrudepro))
+m5.pred = forecast(m5, xreg = cbind(leadcpi,leadcrudepri,leadcrudepro)) 
+accuracy(m5.pred,retail_price)
+```
+
+## Compare all models
+```{r}
+accuracy(naive, validation)
+
+accuracy(snaive, validation)
+
+accuracy(ma.pred, validation)
+
+accuracy(zzz.pred,validation)
+
+accuracy(m1.pred, validation) #ARIMA(0,1,1)(1,0,0)12
+
+accuracy(m2.pred, validation) #ARIMA(0,1,1)(0,0,0)12
+
+accuracy(gasolineprice.nnetar.opt.pred, valid.ts)  
+
+accuracy(m4$fitted.values, gasoline.ts)
+
+AIC(m4)
+m5$AIC
+```
+
+## Revaluate model accuracy with new released data
+```{r}
+actual.gasoline <- c(3.935,3.799)
+actual.ts <- ts(actual.gasoline, start=c(2022,10),end=c(2022,11), frequency = 12)
+
+#1
+naive.pred = naive(training, h = 11)
+accuracy(naive.pred, actual.ts)
+accuracy(naive, validation)
+
+#2
+snaive.pred = snaive(training, h = 11)
+accuracy(snaive.pred, actual.ts)
+accuracy(snaive, validation)
+
+#3
+n = length(gasoline.ts)
+
+w = 9
+nValid = w
+
+ma.trail.pred1= rep(NA, nValid)
+
+for (i in 1:11) {
+  nTraining= n-nValid + (i - 1)
+  training3=window(gasoline.ts, start=c(2012, 1), 
+                    end=c(2012, nTraining))
+  
+  ma.trailing.tmp1 = rollmean(training3, k=w, align="right")
+  last.ma1=tail(ma.trailing.tmp1,1)
+  
+  ma.trail.pred1[i] = last.ma1
+}
+
+ma.pred1= ts(ma.trail.pred1,start=c(2012,length(gasoline.ts)-nValid+1), frequency = 12)
+
+validation <- window(gasoline.ts, start=c(2022,1))
+
+accuracy(ma.pred1, actual.ts)
+
+
+#4
+zzz.pred1=forecast(zzz,h=11,level=0)
+accuracy(zzz.pred1, actual.ts)
+
+#5
+m1.pred1 = forecast(m1,h=11)
+accuracy(m1.pred1, actual.ts)
+
+
+#5
+m2.pred1 = forecast(m2,h=11)
+accuracy(m2.pred1, actual.ts)
+
+#6
+gasolineprice.nnetar.opt.pred1 <- forecast(gasolineprice.nnetar.opt, h = 11)
+accuracy(gasolineprice.nnetar.opt.pred1, actual.ts)  
+
+
+#7
+summary(m4)
+actual.gasoline <- c(3.935,3.799)
+
+
+variable.data <- as.data.frame(ts.intersect(leadcpi1=lag(cpi.ts,-34),
+                        leadcrudepri1=lag(crudeoil.ts,-77),
+                        leadcrudepro1=lag(production.ts,-20)))
+
+attach(variable.data)
+reg.pred <- rep(NA, length(leadcpi1))
+n = length(reg.pred)
+
+for (i in 1:n) {
+  reg.pred[i] = m4$coefficients[1] + m4$coefficients[2] * leadcpi1[i] +
+                m4$coefficients[3]* leadcrudepri1[i] +
+                m4$coefficients[4]* leadcrudepro1[i]
+}
+m4$fitted.values
+reg.pred.ts <- ts(reg.pred, start=c(2018,6),frequency=12)
+gasoline.ts <- ts(append(as.numeric(gasoline.ts), actual.gasoline),start=c(2012,1),frequency = 12)
+accuracy(reg.pred.ts, gasoline.ts)
+accuracy(reg.pred.ts, actual.ts)
+
+
+e <- reg.pred.ts - gasoline.ts
+m <- quantile(e, probs = c(0.025,0.975))
+lb=reg.pred.ts+m[1]
+ub=reg.pred.ts+m[2]
+
+autoplot(reg.pred.ts) +
+  autolayer(lb)+ autolayer(ub)
+
+checkresiduals(m4)
+qqnorm(e)
+qqline(e)
+```
+
+
+
+
+
+
